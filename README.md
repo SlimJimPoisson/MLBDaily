@@ -12,6 +12,18 @@ get a tidy folder of condensed games named with the date and standings.
 2025‑09‑24 mil(95‑63) @ sd(87‑71) condensed.mp4
 ```
 
+## Download (no Python or ffmpeg needed)
+
+Not a developer? Grab the ready-to-run Windows build:
+
+1. Go to the [**Releases**](https://github.com/SlimJimPoisson/MLBDaily/releases/latest) page and download `MLBDaily-vX.Y-win64.zip`.
+2. Unzip it anywhere.
+3. Double-click **`MLBDaily.exe`**.
+
+ffmpeg is bundled, so there's nothing else to install. On first launch Windows
+may show a SmartScreen warning for the unsigned app — click **More info → Run
+anyway**. Prefer the command line or another OS? Use the Python script (below).
+
 ## Features
 - **Record-aware filtering** — picks what to grab for each game from the teams' standings *entering* that day (see [How it decides](#how-it-decides)).
 - **Everything is a parameter** — tune the rules with `--follow`, `--never-losers`, and `--losing`, on the command line, in a JSON config file, or via the GUI.

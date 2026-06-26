@@ -28,6 +28,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+__version__ = "1.0.0"
+
 # ANSI colors for terminal output
 class Colors:
     GREEN = '\033[92m'
@@ -544,29 +546,69 @@ def get_condensed_games(date_str, config):
 # External tool (ffmpeg/ffprobe) resolution
 # -----------------------------------------------------------------------------
 
-def _app_dir():
-    """Directory to search for helper binaries bundled with the app.
+def _app_dirs():
+    """Candidate directories that may hold helper binaries bundled with the app.
 
-    Under a PyInstaller build, ffmpeg/ffprobe are shipped beside (or inside) the
-    executable: onefile extracts to sys._MEIPASS, onedir sits next to the exe.
-    When running as a plain script, look next to the .py file."""
+    Covers both PyInstaller layouts (onefile extracts to sys._MEIPASS; onedir
+    keeps them next to the executable) and a plain source run (next to the .py)."""
+    dirs = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        dirs.append(meipass)
     if getattr(sys, "frozen", False):
-        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+        dirs.append(os.path.dirname(sys.executable))
+    dirs.append(os.path.dirname(os.path.abspath(__file__)))
+    return dirs
 
 
 def resolve_tool(name):
     """Locate ffmpeg/ffprobe: prefer a copy bundled with the app, else rely on
     PATH (returns the bare name so the OS resolves it)."""
     exe = name + (".exe" if os.name == "nt" else "")
-    bundled = os.path.join(_app_dir(), exe)
-    return bundled if os.path.isfile(bundled) else name
+    for d in _app_dirs():
+        bundled = os.path.join(d, exe)
+        if os.path.isfile(bundled):
+            return bundled
+    return name
 
 
 # Resolved once at import. A bundled build finds its own ffmpeg; a source run
 # falls back to PATH exactly as before.
 FFMPEG = resolve_tool("ffmpeg")
 FFPROBE = resolve_tool("ffprobe")
+
+
+def doctor():
+    """Report where ffmpeg/ffprobe resolve to and whether they run. Returns 0 if
+    both work, else 1 -- so the exit code is a valid self-test even in a windowed
+    build where there's no console to print to."""
+    def emit(s):
+        try:
+            print(s)
+        except Exception:
+            pass  # windowed exe: no stdout. Exit code still carries the result.
+
+    ok = True
+    emit(f"MLBDaily {__version__}")
+    emit(f"frozen: {bool(getattr(sys, 'frozen', False))}")
+    for label, tool in (("ffmpeg", FFMPEG), ("ffprobe", FFPROBE)):
+        bundled = os.path.isabs(tool)
+        try:
+            out = subprocess.run([tool, "-version"], stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, universal_newlines=True,
+                                 timeout=30)
+            ver = out.stdout.splitlines()[0] if out.stdout else "(no output)"
+            status = "OK" if out.returncode == 0 else f"FAILED (exit {out.returncode})"
+            if out.returncode != 0:
+                ok = False
+        except Exception as e:
+            ver, status = f"{type(e).__name__}: {e}", "NOT RUNNABLE"
+            ok = False
+        emit(f"  {label:8s} [{'bundled' if bundled else 'PATH'}] {status}")
+        emit(f"           path: {tool}")
+        emit(f"           {ver}")
+    emit("result: " + ("all good" if ok else "PROBLEM — see above"))
+    return 0 if ok else 1
 
 
 # -----------------------------------------------------------------------------
@@ -1345,6 +1387,10 @@ Examples:
     filter_group.add_argument('--list-teams', action='store_true',
         help='Print all team abbreviations and exit.')
 
+    parser.add_argument('--version', action='version', version=f'MLBDaily {__version__}')
+    parser.add_argument('--doctor', action='store_true',
+        help='Report ffmpeg/ffprobe resolution and exit (diagnostic).')
+
     parser.add_argument('--config', metavar='PATH',
         help='JSON config file with default options (CLI flags override it). '
              'If omitted, mlbdaily.config.json in the current or script dir is '
@@ -1358,6 +1404,9 @@ Examples:
     parser.add_argument('--gui', action='store_true', help='Launch the tkinter GUI instead of CLI')
 
     args = parser.parse_args()
+
+    if args.doctor:
+        return doctor()
 
     if args.list_teams:
         for tid in sorted(TEAMS, key=lambda t: TEAMS[t][0]):

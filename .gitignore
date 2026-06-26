@@ -25,3 +25,9 @@ mlbdaily.config.json
 
 # Staging-internal punch-list (not for the public repo)
 NEEDS.md
+
+# Build artifacts (compiled exe + downloaded ffmpeg payload)
+/build/
+/dist/
+/ffmpeg/
+*.spec
