@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to mlbdaily.config.json and edit. CLI flags override these. Teams are abbreviations (see --list-teams) or numeric ids.",
+
+  "follow": ["atl"],
+  "never_losers": [],
+  "losing": -3,
+
+  "output_dir": "./mlb_videos",
+  "max_workers": 3,
+  "retries": 2
+}

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor / OS / Dropbox cruft
+*.tmp
+*.tmp.*
+*.bak
+*.bak-*
+*.bak_*
+.DS_Store
+desktop.ini
+Thumbs.db
+
+# MLBDaily runtime artifacts
+mlb_videos/
+.mlbdaily_state.json
+.mlbdaily_crash.log
+*.mp4
+
+# Local config (ship the .example; keep your personal one private)
+mlbdaily.config.json
+
+# Staging-internal punch-list (not for the public repo)
+NEEDS.md

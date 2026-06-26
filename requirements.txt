@@ -1,0 +1,4 @@
+# Python dependency for MLBDaily.
+# External (not pip-installable) prerequisite: ffmpeg + ffprobe on PATH.
+# The GUI (--gui) uses tkinter, which ships with the standard CPython installer.
+requests>=2.25
