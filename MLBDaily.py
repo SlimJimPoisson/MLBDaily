@@ -541,6 +541,35 @@ def get_condensed_games(date_str, config):
         return [], []
 
 # -----------------------------------------------------------------------------
+# External tool (ffmpeg/ffprobe) resolution
+# -----------------------------------------------------------------------------
+
+def _app_dir():
+    """Directory to search for helper binaries bundled with the app.
+
+    Under a PyInstaller build, ffmpeg/ffprobe are shipped beside (or inside) the
+    executable: onefile extracts to sys._MEIPASS, onedir sits next to the exe.
+    When running as a plain script, look next to the .py file."""
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_tool(name):
+    """Locate ffmpeg/ffprobe: prefer a copy bundled with the app, else rely on
+    PATH (returns the bare name so the OS resolves it)."""
+    exe = name + (".exe" if os.name == "nt" else "")
+    bundled = os.path.join(_app_dir(), exe)
+    return bundled if os.path.isfile(bundled) else name
+
+
+# Resolved once at import. A bundled build finds its own ffmpeg; a source run
+# falls back to PATH exactly as before.
+FFMPEG = resolve_tool("ffmpeg")
+FFPROBE = resolve_tool("ffprobe")
+
+
+# -----------------------------------------------------------------------------
 # Live CLI progress display
 # -----------------------------------------------------------------------------
 
@@ -563,7 +592,7 @@ def _probe_duration(url):
     """Return the media duration in seconds via ffprobe, or None if unknown."""
     try:
         out = subprocess.run(
-            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            [FFPROBE, '-v', 'error', '-show_entries', 'format=duration',
              '-of', 'default=noprint_wrappers=1:nokey=1', url],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True, timeout=30)
@@ -769,7 +798,7 @@ def download_video(video_data, output_dir, max_retries=2, progress_cb=None, game
     while retries <= max_retries:
         try:
             if live:
-                cmd = ['ffmpeg', '-i', url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
+                cmd = [FFMPEG, '-i', url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc',
                        '-movflags', 'faststart', '-loglevel', 'error',
                        '-progress', 'pipe:1', '-nostats', output_file]
                 process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -798,7 +827,7 @@ def download_video(video_data, output_dir, max_retries=2, progress_cb=None, game
                 process.wait()
                 stderr = process.stderr.read()
             else:
-                process = subprocess.Popen(['ffmpeg', '-i', url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-movflags', 'faststart', '-loglevel', 'warning', output_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                process = subprocess.Popen([FFMPEG, '-i', url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-movflags', 'faststart', '-loglevel', 'warning', output_file], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                 stdout, stderr = process.communicate()
 
             if process.returncode == 0:
@@ -848,7 +877,7 @@ def run(args):
     args.retries = int(args.retries) if getattr(args, 'retries', None) is not None else 2
 
     try:
-        subprocess.run(['ffmpeg', '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run([FFMPEG, '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     except (subprocess.SubprocessError, FileNotFoundError):
         log("Error: ffmpeg is not installed or not in PATH. Please install ffmpeg first.", Colors.RED)
         return {"success": 0, "skipped": 0, "error": 0, "total": 0, "results": [], "date": None, "output_dir": None}
