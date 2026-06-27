@@ -1,16 +1,21 @@
 # MLBDaily
 
-> Find and download MLB **condensed game** videos for any date, using MLB's free public StatsAPI. No login, no subscription.
+> Find and download MLB **game videos** — condensed games or recaps — for any date, using MLB's free public StatsAPI. No login, no subscription.
 
-MLBDaily looks up a day's games, decides what's worth keeping based on each
-team's record, and downloads it with ffmpeg — either from the command line or a
-small built-in GUI. It's built for a daily habit: point it at "yesterday" and
-get a tidy folder of condensed games named with the date and standings.
+MLBDaily looks up a day's games and downloads them with ffmpeg, from the command
+line or a small built-in GUI. Each run answers two questions: **which games**
+(all, or just your teams) and **what to pull** (condensed, recaps, or a *curated*
+set). It's built for a daily habit: point it at "yesterday" and get a tidy folder
+named with the date and standings.
 
 ```
 2025‑09‑24 bos(86‑71) @ tor(90‑67) condensed.mp4
 2025‑09‑24 mil(95‑63) @ sd(87‑71) condensed.mp4
 ```
+
+> **No spoilers.** The W‑L records baked into each filename are the standings
+> *entering* that game — i.e. from **before first pitch** — so scanning your
+> folder never gives away who won.
 
 ## Download (no Python or ffmpeg needed)
 
@@ -25,9 +30,10 @@ may show a SmartScreen warning for the unsigned app — click **More info → Ru
 anyway**. Prefer the command line or another OS? Use the Python script (below).
 
 ## Features
-- **Record-aware filtering** — picks what to grab for each game from the teams' standings *entering* that day (see [How it decides](#how-it-decides)).
-- **Everything is a parameter** — tune the rules with `--follow`, `--never-losers`, and `--losing`, on the command line, in a JSON config file, or via the GUI.
-- **Condensed *or* recap** — pulls the short condensed game for good matchups and falls back to a recap when only one team is interesting.
+- **Three ways to pull** — `condensed` (default), `recap`, or **`curated`**: the record-aware mode that weights toward the better games (see [✨ Curated mode](#-curated-mode)).
+- **Team scope** — `--teams atl,nyy` to limit any mode to your clubs; leave it off for all 30.
+- **No-spoiler filenames** — records shown are *pre-game*, so your folder never reveals results.
+- **Everything is a parameter** — every rule is set on the command line, in a JSON config file, or via the GUI.
 - **Live terminal progress** — one in-place progress bar per game, with speed and percent.
 - **Optional tkinter GUI** (`--gui`) that remembers your settings between runs.
 - **Self-documenting** — `--list-teams` prints every team abbreviation.
@@ -42,38 +48,57 @@ anyway**. Prefer the command line or another OS? Use the Python script (below).
 ```bash
 pip install -r requirements.txt
 
-python MLBDaily.py --yesterday                       # the daily habit
-python MLBDaily.py --date 2025/09/29 --output-dir ~/Videos/MLB
-python MLBDaily.py --gui                             # graphical front-end
-python MLBDaily.py --list-teams                      # show team abbreviations
+python MLBDaily.py --yesterday                     # all condensed games (default)
+python MLBDaily.py --yesterday --pull recap        # all recaps
+python MLBDaily.py --yesterday --teams atl,nyy     # condensed, just your teams
+python MLBDaily.py --yesterday --pull curated      # ✨ the curated set
+python MLBDaily.py --gui                            # graphical front-end
 ```
 
-## How it decides
+## Usage
 
-For each completed game, MLBDaily compares both teams' records (as they stood the
-day before) against a **winning bar**, then chooses what to download:
+Every run answers two questions: **which games** and **what to pull**.
 
-| Situation | Result |
+- **`--teams LIST`** — limit to games involving these teams (abbreviations or numeric IDs; run `--list-teams`). Leave it off for all 30 clubs.
+- **`--pull MODE`** — one of:
+  - `condensed` *(default)* — the condensed game for every game
+  - `recap` — the recap for every game
+  - `curated` — decide per game from records (see below)
+
+| I want… | Command |
 |---|---|
-| A `--follow` team is playing | **condensed** game (always) |
-| Both teams winning | **condensed** game |
-| Exactly one team winning | **recap** (shorter highlight) |
-| Both teams losing | **log entry only** (nothing downloaded) |
-| A team's record is unknown | **condensed** (fail safe — never miss content) |
+| All condensed games | *(nothing — it's the default)* |
+| All recaps | `--pull recap` |
+| Condensed for just my teams | `--teams atl,nyy` |
+| Recaps for just my teams | `--teams atl,nyy --pull recap` |
+| The smart, curated set | `--pull curated` *(or just set any curated knob)* |
 
-### Tuning the rules
-| Option | Meaning | Example |
+## ✨ Curated mode
+
+This is the heart of MLBDaily — and the reason it beats grabbing everything.
+Instead of a pile of blowouts you'll never watch, **curated mode weights toward
+the better games**, deciding *per game* from each team's record entering that day:
+
+| Both teams… | You get |
+|---|---|
+| winning | the **condensed** game |
+| one winning, one not | the **recap** |
+| both losing | **nothing** (a red "skipped" line, no download) |
+| record unknown | condensed (fail-safe — never miss content) |
+
+Three knobs tune it (they apply **only** in curated mode — pass any one and
+curated mode turns on automatically):
+
+| Flag | Effect | Example |
 |---|---|---|
-| `--follow TEAMS` | Teams whose game is **always** pulled as a condensed game, regardless of record. | `--follow atl,nyy` |
-| `--never-losers TEAMS` | Teams **always treated as winning**, so they never fall into the "both losing" bucket. | `--never-losers lad,hou` |
-| `--losing BAR` | The winning bar. A **whole number** is games vs .500 (`-3` keeps teams within 3 games of .500); a **decimal** is a win percentage (`0.440` keeps teams at .440 or better). Default `-3`. | `--losing 0.440` |
-
-Teams are given as abbreviations (`atl`, `nyy`, …) or numeric StatsAPI IDs.
+| `--follow TEAMS` | Always pull these teams' game as a condensed game, regardless of record | `--follow atl,nyy` |
+| `--never-losers TEAMS` | Treat these teams as always "winning" (never in the both-losing bucket) | `--never-losers lad` |
+| `--losing BAR` | Where the winning line sits — whole number = games vs .500 (`-3`); decimal = win % (`0.440`). Default `-3`. | `--losing 0.440` |
 
 ```bash
-# Always grab the Braves and Yankees; treat the Dodgers as never-losers;
-# count anyone at .440 or better as "winning".
-python MLBDaily.py --yesterday --follow atl,nyy --never-losers lad --losing 0.440
+# Curated, but always keep the Braves and never count the Dodgers as losers,
+# and treat anyone at .440+ as winning:
+python MLBDaily.py --yesterday --pull curated --follow atl --never-losers lad --losing 0.440
 ```
 
 ## Config file (set it once)
@@ -87,15 +112,20 @@ cp mlbdaily.config.example.json mlbdaily.config.json
 
 ```json
 {
+  "pull": "condensed",
+  "teams": [],
+  "output_dir": "./mlb_videos",
+  "max_workers": 3,
+
   "follow": ["atl"],
   "never_losers": [],
-  "losing": -3,
-  "output_dir": "./mlb_videos",
-  "max_workers": 3
+  "losing": -3
 }
 ```
 
-MLBDaily auto-loads `mlbdaily.config.json` from the current directory (or next to
+The `follow`/`never_losers`/`losing` keys are curated-mode only; setting any of
+them (and no `pull`) selects curated mode automatically. MLBDaily auto-loads
+`mlbdaily.config.json` from the current directory (or next to
 the script), or use `--config path/to/file.json`. **Precedence:** CLI flag >
 config file > built-in default — so a flag always wins, and the file just changes
 your defaults. Your personal `mlbdaily.config.json` is gitignored.
@@ -106,6 +136,8 @@ Run `python MLBDaily.py --help` for the full list. Highlights:
 | Flag | Description |
 |---|---|
 | `--date YYYY/MM/DD` · `--today` · `--yesterday` · `--tomorrow` | Which day (default: yesterday). |
+| `--pull {condensed,recap,curated}` | What to download (default: condensed). |
+| `--teams LIST` | Limit to games involving these teams (default: all). |
 | `--output-dir DIR` | Where to save (default `./mlb_videos`). |
 | `--max-workers N` | Concurrent downloads (default 3). |
 | `--retries N` | Retries per failed download (default 2). |

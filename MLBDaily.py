@@ -1,17 +1,23 @@
 ﻿#!/usr/bin/env python3
 """
-MLB Condensed Game Downloader
-----------------------------
-Finds and downloads MLB condensed game videos for a specified date, using the
-public MLB StatsAPI (no login required).
+MLB Daily — Game Video Downloader
+---------------------------------
+Finds and downloads MLB game videos for a specified date, using the public MLB
+StatsAPI (no login required).
+
+Each run answers two questions: which games (--teams) and what to pull (--pull):
+  condensed  the condensed game for every game (default)
+  recap      the recap for every game
+  curated    decide per game from records -- weights toward the better games:
+             both winning -> condensed, one winning -> recap, both losing -> skip
 
 Usage:
-  python MLBDaily.py --date YYYY/MM/DD
-  python MLBDaily.py --yesterday
-  python MLBDaily.py --today
-  python MLBDaily.py --output-dir ~/Videos/MLB
-  python MLBDaily.py --yesterday --follow atl,nyy --losing 0.440
-  python MLBDaily.py --gui          # tkinter front-end
+  python MLBDaily.py --yesterday                       # all condensed (default)
+  python MLBDaily.py --yesterday --pull recap          # all recaps
+  python MLBDaily.py --yesterday --teams atl,nyy       # just your teams
+  python MLBDaily.py --yesterday --pull curated        # the curated set
+  python MLBDaily.py --date 2025/09/29 --output-dir ~/Videos/MLB
+  python MLBDaily.py --gui                             # tkinter front-end
 """
 
 import os
@@ -28,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # ANSI colors for terminal output
 class Colors:
@@ -172,15 +178,23 @@ def get_entering_play_records(formatted_date, headers):
 class FilterConfig:
     """Tunable rules for which games are pulled and as what.
 
-    follow_teams  : team IDs whose game is ALWAYS pulled as a condensed game,
-                    regardless of records.
-    never_losers  : team IDs always treated as "winning" for filtering, even
+    pull          : what to pull for each in-scope game --
+                    'condensed' -> the condensed game (default),
+                    'recap'     -> the recap,
+                    'curated'   -> decide per game from records (below).
+    teams         : scope filter. If non-empty, only games involving one of
+                    these team IDs are considered (empty = all 30 clubs).
+    follow_teams  : (curated only) team IDs whose game is ALWAYS pulled as a
+                    condensed game, regardless of records.
+    never_losers  : (curated only) team IDs always treated as "winning", even
                     when their record is below the threshold.
-    win_metric    : 'games' -> compare (wins - losses) to win_threshold.
-                    'pct'   -> compare win percentage to win_threshold.
-    win_threshold : the cutoff. For 'games' it's a +/- games-vs-.500 number
-                    (e.g. -3); for 'pct' it's a fraction (e.g. 0.440).
+    win_metric    : (curated only) 'games' -> compare (wins - losses); 'pct' ->
+                    compare win percentage; both against win_threshold.
+    win_threshold : (curated only) the cutoff. For 'games' a +/- games-vs-.500
+                    number (e.g. -3); for 'pct' a fraction (e.g. 0.440).
     """
+    pull: str = "condensed"
+    teams: set = field(default_factory=set)
     follow_teams: set = field(default_factory=set)
     never_losers: set = field(default_factory=set)
     win_metric: str = "games"
@@ -200,12 +214,40 @@ def parse_losing(value):
     return metric, float(s)
 
 
+VALID_PULL = ("condensed", "recap", "curated")
+
+
 def build_config(args):
-    """Assemble a FilterConfig from a parsed args namespace (CLI or GUI)."""
+    """Assemble a FilterConfig from a parsed args namespace (CLI or GUI).
+
+    Resolves the 'pull' mode with two rules so the knobs never conflict:
+      - if --pull is unset but any curated knob (follow/never-losers/losing) was
+        given, assume 'curated' (the user clearly wants the curated engine);
+      - if --pull is explicitly 'condensed'/'recap' yet curated knobs were also
+        given, those knobs are inert -- warn and ignore them.
+    Otherwise the default is 'condensed'.
+    """
     metric, threshold = parse_losing(getattr(args, "losing", None) or "-3")
+    follow = parse_team_list(getattr(args, "follow", None))
+    never = parse_team_list(getattr(args, "never_losers", None))
+    teams = parse_team_list(getattr(args, "teams", None))
+
+    knobs_set = bool(follow or never or (getattr(args, "losing", None) not in (None, "")))
+    pull = getattr(args, "pull", None)
+    if pull is None:
+        pull = "curated" if knobs_set else "condensed"
+    elif pull not in VALID_PULL:
+        log(f"Unknown --pull '{pull}'; using 'condensed'", Colors.YELLOW)
+        pull = "condensed"
+    elif pull in ("condensed", "recap") and knobs_set:
+        log("Note: --follow/--never-losers/--losing apply only with --pull "
+            f"curated; ignored for --pull {pull}.", Colors.YELLOW)
+
     return FilterConfig(
-        follow_teams=parse_team_list(getattr(args, "follow", None)),
-        never_losers=parse_team_list(getattr(args, "never_losers", None)),
+        pull=pull,
+        teams=teams,
+        follow_teams=follow,
+        never_losers=never,
         win_metric=metric,
         win_threshold=threshold,
     )
@@ -215,7 +257,7 @@ def build_config(args):
 # instead of passing flags every run. CLI flags always override the file, which
 # overrides the built-in defaults. Keys mirror the long flag names.
 DEFAULT_CONFIG_NAME = "mlbdaily.config.json"
-CONFIG_KEYS = ("follow", "never_losers", "losing",
+CONFIG_KEYS = ("pull", "teams", "follow", "never_losers", "losing",
                "output_dir", "max_workers", "retries")
 
 
@@ -268,12 +310,16 @@ def describe_config(config):
     """One-line human summary of the active filter rules, for logging."""
     def names(ids):
         return ", ".join(sorted(get_team_abbreviation(t) for t in ids)) or "(none)"
+    scope = f"teams: {names(config.teams)}" if config.teams else "teams: all"
+    if config.pull != "curated":
+        return f"pull: {config.pull} | {scope}"
     if config.win_metric == "pct":
         bar = f"win% >= {config.win_threshold:.3f}"
     else:
         bar = f"(W-L) >= {config.win_threshold:+g}"
-    return (f"winning bar: {bar} | always-condensed: {names(config.follow_teams)} "
-            f"| never-losers: {names(config.never_losers)}")
+    return (f"pull: curated | {scope} | winning bar: {bar} | "
+            f"always-condensed: {names(config.follow_teams)} | "
+            f"never-losers: {names(config.never_losers)}")
 
 # VLC rewrites the ASCII hyphen-minus to a space when it derives a title from the
 # filename. Use a non-breaking hyphen (U+2011) in filenames instead -- it looks
@@ -331,17 +377,26 @@ def team_is_winning(team_id, record, config):
 
 
 def classify_game(away_id, home_id, away_record, home_record, config):
-    """Pick which media to pull for a game from entering-play records.
+    """Pick which media to pull for a game. Returns 'condensed', 'recap', or
+    None (skip -- log entry only).
 
-    Returns 'condensed', 'recap', or None (log entry only):
+    The simple modes apply uniformly:
+      - pull='condensed' -> always 'condensed'
+      - pull='recap'     -> always 'recap'
+
+    pull='curated' decides per game from entering-play records:
       - Follow-list team involved -> 'condensed' (always).
       - Both teams winning        -> 'condensed'.
       - Exactly one winning       -> 'recap'.
-      - Both teams losing         -> None.
+      - Both teams losing         -> None (skip).
       - Unknown record(s)         -> 'condensed' (fail safe; don't miss content).
-
     'never losers' teams are treated as winning regardless of their record.
     """
+    if config.pull == "condensed":
+        return "condensed"
+    if config.pull == "recap":
+        return "recap"
+    # curated:
     if away_id in config.follow_teams or home_id in config.follow_teams:
         return "condensed"
     aw = team_is_winning(away_id, away_record, config)
@@ -459,6 +514,11 @@ def get_condensed_games(date_str, config):
             home_abbrev = get_team_abbreviation(home_team_id) if home_team_id else "UNK"
             away_abbrev = get_team_abbreviation(away_team_id) if away_team_id else "UNK"
 
+            # Scope filter: with --teams set, skip games involving none of them.
+            if config.teams and away_team_id not in config.teams and home_team_id not in config.teams:
+                log(f"Skip (not in --teams): {away_abbrev} @ {home_abbrev}", Colors.RED, verbose=True)
+                continue
+
             away_record = entering_records.get(away_team_id)
             home_record = entering_records.get(home_team_id)
 
@@ -468,7 +528,7 @@ def get_condensed_games(date_str, config):
 
             if kind is None:
                 # Both teams losing and neither is a follow team: log entry only.
-                log(f"Log only (both losing): {matchup}", Colors.YELLOW)
+                log(f"Skipped (both losing): {matchup}", Colors.RED)
                 logonly_games.append({
                     "matchup": matchup,
                     "away_abbrev": away_abbrev,
@@ -1022,11 +1082,20 @@ def run(args):
         d[st] = d.get(st, 0) + 1
     log("-" * 50)
     log("By type:", Colors.BOLD)
-    for k in ("condensed", "recap"):
-        d = by_type[k]
+    # Only show the type lines relevant to the chosen mode (avoids "recap 0" noise
+    # in condensed mode, etc.). The both-losing "Skipped" line is curated-only.
+    if config.pull == "condensed":
+        types_to_show = ["condensed"]
+    elif config.pull == "recap":
+        types_to_show = ["recap"]
+    else:
+        types_to_show = ["condensed", "recap"]
+    for k in types_to_show:
+        d = by_type.get(k, {"success": 0, "skipped": 0, "error": 0})
         log(f"  {k.capitalize():10s} {d['success']} downloaded, "
             f"{d['skipped']} skipped, {d['error']} failed")
-    log(f"  {'Losers':10s} {len(logonly_games)} skipped (both losing, log only)", Colors.YELLOW)
+    if config.pull == "curated":
+        log(f"  {'Skipped':10s} {len(logonly_games)} games (both losing, not downloaded)", Colors.RED)
 
     if stats["error"] > 0:
         log("-" * 50)
@@ -1099,13 +1168,15 @@ def _launch_gui_impl():
     initial_date = compute_default_date().strftime("%Y-%m-%d")
     initial_outdir = state.get("last_output_dir", "./mlb_videos")
     initial_workers = int(state.get("last_workers", 3))
+    initial_pull = state.get("last_pull", "condensed")
+    initial_teams = state.get("last_teams", "")
     initial_follow = state.get("last_follow", "")
     initial_never = state.get("last_never_losers", "")
     initial_losing = state.get("last_losing", "-3")
 
     root = tk.Tk()
     root.title("MLB Daily")
-    root.geometry("780x600")
+    root.geometry("780x650")
     try:
         root.configure(bg="#1e1e2e")
     except Exception:
@@ -1156,20 +1227,50 @@ def _launch_gui_impl():
     run_btn = tk.Button(opt_frame, text="Run", width=12)
     run_btn.pack(side="right", padx=4)
 
-    # ---- Row 4: filtering ----
-    filt_frame = tk.Frame(root, bg="#1e1e2e")
-    filt_frame.pack(fill="x", padx=10, pady=4)
-    tk.Label(filt_frame, text="Always condensed:", bg="#1e1e2e", fg="#cdd6f4").pack(side="left")
+    # ---- Row 4: what to download (pull mode) + team scope ----
+    what_frame = tk.Frame(root, bg="#1e1e2e")
+    what_frame.pack(fill="x", padx=10, pady=4)
+    tk.Label(what_frame, text="Download:", bg="#1e1e2e", fg="#cdd6f4").pack(side="left")
+    pull_var = tk.StringVar(value=initial_pull)
+    for _val, _lbl in (("condensed", "Condensed"), ("recap", "Recaps"), ("curated", "Curated")):
+        tk.Radiobutton(what_frame, text=_lbl, value=_val, variable=pull_var,
+                       bg="#1e1e2e", fg="#cdd6f4", selectcolor="#313244",
+                       activebackground="#1e1e2e", activeforeground="#cdd6f4").pack(side="left", padx=2)
+    tk.Label(what_frame, text="    Teams:", bg="#1e1e2e", fg="#cdd6f4").pack(side="left")
+    teams_var = tk.StringVar(value=initial_teams)
+    tk.Entry(what_frame, textvariable=teams_var, width=18).pack(side="left", padx=(6, 6))
+    tk.Label(what_frame, text="(blank = all)", bg="#1e1e2e", fg="#6c7086").pack(side="left")
+
+    # ---- Row 5: curated-only knobs (enabled only when 'Curated' is selected) ----
+    cur_frame = tk.Frame(root, bg="#1e1e2e")
+    cur_frame.pack(fill="x", padx=10, pady=4)
+    cur_widgets = []
+
+    def _cur_label(txt):
+        lb = tk.Label(cur_frame, text=txt, bg="#1e1e2e", fg="#cdd6f4", disabledforeground="#6c7086")
+        lb.pack(side="left")
+        cur_widgets.append(lb)
+
+    _cur_label("Always condensed:")
     follow_var = tk.StringVar(value=initial_follow)
-    tk.Entry(filt_frame, textvariable=follow_var, width=16).pack(side="left", padx=(6, 12))
-    tk.Label(filt_frame, text="Never losers:", bg="#1e1e2e", fg="#cdd6f4").pack(side="left")
+    _e = tk.Entry(cur_frame, textvariable=follow_var, width=14); _e.pack(side="left", padx=(6, 12)); cur_widgets.append(_e)
+    _cur_label("Never losers:")
     never_var = tk.StringVar(value=initial_never)
-    tk.Entry(filt_frame, textvariable=never_var, width=16).pack(side="left", padx=(6, 12))
-    tk.Label(filt_frame, text="Losing bar:", bg="#1e1e2e", fg="#cdd6f4").pack(side="left")
+    _e = tk.Entry(cur_frame, textvariable=never_var, width=14); _e.pack(side="left", padx=(6, 12)); cur_widgets.append(_e)
+    _cur_label("Losing bar:")
     losing_var = tk.StringVar(value=initial_losing)
-    tk.Entry(filt_frame, textvariable=losing_var, width=8).pack(side="left", padx=(6, 0))
-    tk.Label(filt_frame, text="(e.g. atl,nyy   |   -3 games or 0.440 pct)",
-             bg="#1e1e2e", fg="#6c7086").pack(side="left", padx=8)
+    _e = tk.Entry(cur_frame, textvariable=losing_var, width=8); _e.pack(side="left", padx=(6, 0)); cur_widgets.append(_e)
+    _cur_label("  (-3 games or 0.440 pct)")
+
+    def _sync_curated(*_):
+        st = "normal" if pull_var.get() == "curated" else "disabled"
+        for w in cur_widgets:
+            try:
+                w.configure(state=st)
+            except Exception:
+                pass
+    pull_var.trace_add("write", _sync_curated)
+    _sync_curated()
 
     # ---- Log area ----
     log_text = scrolledtext.ScrolledText(root, wrap="word", state="disabled",
@@ -1266,11 +1367,16 @@ def _launch_gui_impl():
             "last_date": chosen,
             "last_output_dir": out_var.get(),
             "last_workers": int(workers_var.get()),
+            "last_pull": pull_var.get(),
+            "last_teams": teams_var.get().strip(),
             "last_follow": follow_var.get().strip(),
             "last_never_losers": never_var.get().strip(),
             "last_losing": losing_var.get().strip() or "-3",
         })
 
+        # The curated knobs only matter in curated mode; pass empty otherwise so
+        # they neither trigger the "ignored" warning nor pull in a config file.
+        curated = pull_var.get() == "curated"
         args = argparse.Namespace(
             date=chosen.replace("-", "/"),
             today=False, yesterday=False, tomorrow=False,
@@ -1280,9 +1386,11 @@ def _launch_gui_impl():
             dry_run=bool(dry_var.get()),
             save_json=None,
             verbose=bool(verbose_var.get()),
-            follow=follow_var.get().strip(),
-            never_losers=never_var.get().strip(),
-            losing=losing_var.get().strip() or "-3",
+            pull=pull_var.get(),
+            teams=teams_var.get().strip(),
+            follow=(follow_var.get().strip() if curated else ""),
+            never_losers=(never_var.get().strip() if curated else ""),
+            losing=((losing_var.get().strip() or "-3") if curated else ""),
             gui=False,
         )
 
@@ -1353,17 +1461,17 @@ def main():
         except Exception:
             pass
 
-    parser = argparse.ArgumentParser(description='''MLB Condensed Game Downloader
+    parser = argparse.ArgumentParser(description='''MLB Daily — Game Video Downloader
 
-Finds and downloads MLB condensed game videos for a specified date, using the
-public MLB StatsAPI. Games are filtered by the teams' entering-play records:
-both teams winning -> condensed game; one winning -> recap; both losing -> a
-log entry only. Tune that behavior with --follow, --never-losers, and --losing.
+Finds and downloads MLB game videos for a date, using the public MLB StatsAPI.
+Each run answers two questions: which games (--teams) and what to pull (--pull).
 
 Examples:
-  python MLBDaily.py --yesterday
+  python MLBDaily.py --yesterday                     # all condensed (default)
+  python MLBDaily.py --yesterday --pull recap        # all recaps
+  python MLBDaily.py --yesterday --teams atl,nyy     # just your teams
+  python MLBDaily.py --yesterday --pull curated      # the curated set
   python MLBDaily.py --date 2025/09/29 --output-dir ~/Videos/MLB
-  python MLBDaily.py --yesterday --follow atl,nyy --losing 0.440
 ''', formatter_class=argparse.RawDescriptionHelpFormatter)
 
     date_group = parser.add_argument_group('Date Selection')
@@ -1373,18 +1481,29 @@ Examples:
     date_options.add_argument('--tomorrow', action='store_true', help='Use tomorrow\'s date')
     date_options.add_argument('--yesterday', action='store_true', help='Use yesterday\'s date (default)')
 
-    filter_group = parser.add_argument_group('Filtering')
-    filter_group.add_argument('--follow', metavar='TEAMS',
-        help='Comma-separated teams whose game is ALWAYS pulled as a condensed '
-             'game, regardless of record (e.g. "atl,nyy"). Default: none.')
-    filter_group.add_argument('--never-losers', metavar='TEAMS',
-        help='Comma-separated teams always treated as "winning" for filtering, '
-             'even when below the bar (e.g. "lad,hou"). Default: none.')
-    filter_group.add_argument('--losing', metavar='BAR', default=None,
+    what_group = parser.add_argument_group('What to download')
+    what_group.add_argument('--pull', choices=VALID_PULL, default=None,
+        help="condensed = condensed game for every game (default); "
+             "recap = recap for every game; "
+             "curated = decide per game from records (weights toward better games).")
+    what_group.add_argument('--teams', metavar='TEAMS',
+        help='Only games involving these teams, e.g. "atl,nyy" (abbreviations or '
+             'numeric ids). Default: all 30 clubs.')
+
+    curated_group = parser.add_argument_group('Curated mode (only with --pull curated)')
+    curated_group.add_argument('--follow', metavar='TEAMS',
+        help='Teams whose game is ALWAYS pulled as a condensed game, regardless '
+             'of record (e.g. "atl,nyy").')
+    curated_group.add_argument('--never-losers', metavar='TEAMS',
+        help='Teams always treated as "winning", even when below the bar '
+             '(e.g. "lad,hou").')
+    curated_group.add_argument('--losing', metavar='BAR', default=None,
         help='The winning bar. A whole number is games vs .500 — e.g. -3 keeps '
              'teams within 3 games of .500; a decimal is a win%% — e.g. 0.440 '
-             'keeps teams at .440 or better. Default: -3.')
-    filter_group.add_argument('--list-teams', action='store_true',
+             'keeps teams at .440 or better. Default: -3. (Passing this, '
+             '--follow, or --never-losers selects curated mode automatically.)')
+
+    parser.add_argument('--list-teams', action='store_true',
         help='Print all team abbreviations and exit.')
 
     parser.add_argument('--version', action='version', version=f'MLBDaily {__version__}')

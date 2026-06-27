@@ -1,11 +1,15 @@
 {
   "_comment": "Copy to mlbdaily.config.json and edit. CLI flags override these. Teams are abbreviations (see --list-teams) or numeric ids.",
 
-  "follow": ["atl"],
-  "never_losers": [],
-  "losing": -3,
+  "pull": "condensed",
+  "teams": [],
 
   "output_dir": "./mlb_videos",
   "max_workers": 3,
-  "retries": 2
+  "retries": 2,
+
+  "_curated_comment": "The keys below apply only in curated mode (set pull to 'curated', or just set one of these).",
+  "follow": [],
+  "never_losers": [],
+  "losing": -3
 }
